@@ -93,25 +93,37 @@ The tool generates a kubeconfig file (e.g., `kubeconfig-username.yaml`) with sep
 
 ## Generated Kubeconfig
 
-The generated kubeconfig contains one context per namespace:
+The generated kubeconfig contains a single context with accessible namespaces listed in comments:
 
 ```yaml
+apiVersion: v1
+kind: Config
+#
+# Accessible namespaces:
+#   - production
+#   - staging
+#
+# Usage:
+#   kubectl get pods -n <namespace>
+#   kubectl config set-context --current --namespace=<namespace>
+#
 contexts:
-- name: username@cluster/production
+- name: username@cluster
   context:
     cluster: my-cluster
     user: username
-    namespace: production
-- name: username@cluster/staging
-  context:
-    cluster: my-cluster
-    user: username
-    namespace: staging
 ```
 
-Users can switch between namespaces using:
+Users can list available namespaces and switch between them:
 ```bash
-kubectl config use-context username@cluster/staging
+# List all namespaces (user can only access their permitted ones)
+kubectl get namespaces
+
+# Access resources in a specific namespace
+kubectl get pods -n production
+
+# Set default namespace for current context
+kubectl config set-context --current --namespace=staging
 ```
 
 ## Requirements
@@ -126,7 +138,7 @@ kubectl config use-context username@cluster/staging
 2. Creates a ServiceAccount in the `shared-access` namespace
 3. Creates Roles with specified permissions in each selected namespace
 4. Creates RoleBindings to link the ServiceAccount to the Roles
-5. Optionally creates ClusterRole and ClusterRoleBinding for cluster-wide access
+5. Creates ClusterRole with namespace listing + optional cluster-wide access
 6. Generates a token and creates a kubeconfig file
 
 ## License

@@ -435,7 +435,12 @@ create_cluster_role() {
   local sa="$1"
   shift
   local options=("$@")
-  local rules=""
+
+  # Always include namespace listing permission
+  local rules='
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]'
 
   for opt in "${options[@]}"; do
     case "$opt" in
@@ -463,15 +468,13 @@ create_cluster_role() {
     esac
   done
 
-  if [[ -n "$rules" ]]; then
-    kubectl --context="$CONTEXT" apply -f - <<EOF >/dev/null
+  kubectl --context="$CONTEXT" apply -f - <<EOF >/dev/null
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: ${sa}-cluster-access
 rules:${rules}
 EOF
-  fi
 }
 
 bind_cluster_role() {
@@ -507,24 +510,23 @@ generate_kubeconfig() {
 
   FILE="kubeconfig-${sa}.yaml"
 
-  local contexts=""
-  local first_context=""
+  # Build namespace list for comments
+  local ns_list=""
   for ns in "${namespaces[@]}"; do
-    local ctx_name="${sa}@${CLUSTER}/${ns}"
-    if [[ -z "$first_context" ]]; then
-      first_context="$ctx_name"
-    fi
-    contexts+="- name: ${ctx_name}
-  context:
-    cluster: ${CLUSTER}
-    user: ${sa}
-    namespace: ${ns}
-"
+    ns_list+="#   - ${ns}\n"
   done
 
   cat <<EOF > "$FILE"
 apiVersion: v1
 kind: Config
+#
+# Accessible namespaces:
+$(printf "#   - %s\n" "${namespaces[@]}")
+#
+# Usage:
+#   kubectl get pods -n <namespace>
+#   kubectl config set-context --current --namespace=<namespace>
+#
 clusters:
 - name: $CLUSTER
   cluster:
@@ -535,11 +537,15 @@ users:
   user:
     token: $TOKEN
 contexts:
-${contexts}current-context: ${first_context}
+- name: ${sa}@${CLUSTER}
+  context:
+    cluster: ${CLUSTER}
+    user: ${sa}
+current-context: ${sa}@${CLUSTER}
 EOF
 
   printf "${GREEN}📄 kubeconfig written: ${BOLD}$FILE${RESET}\n"
-  printf "${DIM}   Contains %d namespace contexts${RESET}\n" "${#namespaces[@]}"
+  printf "${DIM}   Access to %d namespaces${RESET}\n" "${#namespaces[@]}"
 }
 
 ### CREATE USER ###
@@ -674,18 +680,19 @@ EOF
     printf "\r  ${GREEN}✓${RESET}  %s\n" "$ns"
   done
 
+  printf "${CYAN}🌐 Applying cluster-wide access...${RESET}\n"
+  create_cluster_role "$USER" "${CLUSTER_OPTIONS[@]}"
+  bind_cluster_role "$USER"
+  printf "  ${GREEN}✓${RESET} Namespace listing enabled\n"
   if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
-    printf "${CYAN}🌐 Applying cluster-wide access...${RESET}\n"
-    create_cluster_role "$USER" "${CLUSTER_OPTIONS[@]}"
-    bind_cluster_role "$USER"
-    printf "  ${GREEN}✓${RESET} Cluster access configured\n"
+    printf "  ${GREEN}✓${RESET} Additional: %s\n" "${CLUSTER_OPTIONS[*]}"
   fi
 
   generate_kubeconfig "$USER" "${NAMESPACES[@]}"
 
   printf "\n${GREEN}${BOLD}🎉 Access successfully granted!${RESET}\n"
   printf "👉 Share the generated kubeconfig file securely.\n"
-  printf "${DIM}   Each namespace is a separate context in the kubeconfig.${RESET}\n"
+  printf "${DIM}   User can run: kubectl get namespaces${RESET}\n"
   printf "\n"
   read -rp "Press Enter to continue..."
 }
