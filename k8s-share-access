@@ -627,16 +627,9 @@ create_user() {
   fi
 
   # Cluster access options
-  select_many "Select cluster-wide access (optional):" "View nodes" "View storage" "View cluster events" "← Go back"
+  select_many "Select cluster-wide access (optional):" "View nodes" "View storage" "View cluster events"
 
-  # Check if "Go back" was selected
-  for val in "${SELECTED_VALUES[@]}"; do
-    if [[ "$val" == "← Go back" ]]; then
-      return
-    fi
-  done
-
-  CLUSTER_OPTIONS=("${SELECTED_VALUES[@]}")
+  CLUSTER_OPTIONS=("${SELECTED_VALUES[@]+"${SELECTED_VALUES[@]}"}")
   if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
     printf "\n${GREEN}✓${RESET} Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
   else
