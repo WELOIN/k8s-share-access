@@ -275,7 +275,13 @@ delete_user() {
     users+=("$line")
   done <<< "$bindings"
 
+  users+=("← Go back")
   select_one "Select user to delete:" "${users[@]}"
+
+  if [[ "$SELECTED_VALUE" == "← Go back" ]]; then
+    return
+  fi
+
   local user_to_delete="$SELECTED_VALUE"
 
   # Show user details
@@ -576,8 +582,10 @@ create_user() {
   fi
 
   # Choose access level
-  select_one "Select access level:" "Read-only (view resources)" "Read-write (full access)"
-  if [[ "$SELECTED_INDEX" -eq 0 ]]; then
+  select_one "Select access level:" "Read-only (view resources)" "Read-write (full access)" "← Go back"
+  if [[ "$SELECTED_INDEX" -eq 2 ]]; then
+    return
+  elif [[ "$SELECTED_INDEX" -eq 0 ]]; then
     MODE="ro"
     printf "\n${GREEN}✓${RESET} Access level: ${BOLD}Read-only${RESET}\n"
   else
@@ -586,9 +594,11 @@ create_user() {
   fi
 
   # Choose namespaces
-  select_one "Grant access to all namespaces?" "Yes - all namespaces" "No - select specific namespaces"
+  select_one "Grant access to all namespaces?" "Yes - all namespaces" "No - select specific namespaces" "← Go back"
 
-  if [[ "$SELECTED_INDEX" -eq 0 ]]; then
+  if [[ "$SELECTED_INDEX" -eq 2 ]]; then
+    return
+  elif [[ "$SELECTED_INDEX" -eq 0 ]]; then
     NAMESPACES=()
     while IFS= read -r line; do
       NAMESPACES+=("$line")
@@ -611,7 +621,15 @@ create_user() {
   fi
 
   # Cluster access options
-  select_many "Select cluster-wide access (optional):" "View nodes" "View storage" "View cluster events"
+  select_many "Select cluster-wide access (optional):" "View nodes" "View storage" "View cluster events" "← Go back"
+
+  # Check if "Go back" was selected
+  for val in "${SELECTED_VALUES[@]}"; do
+    if [[ "$val" == "← Go back" ]]; then
+      return
+    fi
+  done
+
   CLUSTER_OPTIONS=("${SELECTED_VALUES[@]}")
   if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
     printf "\n${GREEN}✓${RESET} Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
