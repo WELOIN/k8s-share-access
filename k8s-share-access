@@ -1,0 +1,698 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+### METADATA ###
+SCRIPT_NAME="k8s-share-access"
+INSTALL_PATH="/usr/local/bin/${SCRIPT_NAME}"
+
+### NAMESPACE & ROLES ###
+SHARED_NS="shared-access"
+ROLE_RO="shared-readonly"
+ROLE_RW="shared-readwrite"
+
+### COLORS ###
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+### CURSOR CONTROL ###
+hide_cursor() { tput civis 2>/dev/null || printf '\033[?25l'; }
+show_cursor() { tput cnorm 2>/dev/null || printf '\033[?25h'; }
+cursor_up() { tput cuu "$1" 2>/dev/null || printf '\033[%dA' "$1"; }
+clear_line() { tput el 2>/dev/null || printf '\033[K'; }
+
+# Ensure cursor is shown on exit
+trap 'show_cursor' EXIT
+
+### SINGLE SELECT FUNCTION ###
+select_one() {
+  local prompt="$1"
+  shift
+  local options=("$@")
+  local selected=0
+  local count=${#options[@]}
+  local i key escape
+
+  hide_cursor
+
+  printf "\n${CYAN}${BOLD}%s${RESET}\n" "$prompt"
+  printf "${DIM}Use ↑/↓ to navigate, Enter to select${RESET}\n\n"
+
+  for i in "${!options[@]}"; do
+    if [[ $i -eq $selected ]]; then
+      printf "  ${GREEN}❯ %s${RESET}\n" "${options[$i]}"
+    else
+      printf "    ${DIM}%s${RESET}\n" "${options[$i]}"
+    fi
+  done
+
+  while true; do
+    IFS= read -rsn1 key
+
+    if [[ $key == $'\x1b' ]]; then
+      IFS= read -rsn1 -t 1 escape
+      if [[ $escape == "[" ]]; then
+        IFS= read -rsn1 -t 1 escape
+        case "$escape" in
+          A) ((selected > 0)) && ((selected--)) ;;
+          B) ((selected < count - 1)) && ((selected++)) ;;
+        esac
+      fi
+    elif [[ $key == "" ]]; then
+      break
+    fi
+
+    cursor_up "$count"
+    for i in "${!options[@]}"; do
+      printf "\r"
+      clear_line
+      if [[ $i -eq $selected ]]; then
+        printf "  ${GREEN}❯ %s${RESET}\n" "${options[$i]}"
+      else
+        printf "    ${DIM}%s${RESET}\n" "${options[$i]}"
+      fi
+    done
+  done
+
+  show_cursor
+  SELECTED_INDEX=$selected
+  SELECTED_VALUE="${options[$selected]}"
+}
+
+### MULTI SELECT FUNCTION ###
+select_many() {
+  local prompt="$1"
+  shift
+  local options=("$@")
+  local count=${#options[@]}
+  local selected=0
+  local i key escape
+  local -a checked=()
+
+  for ((i = 0; i < count; i++)); do
+    checked+=("false")
+  done
+
+  hide_cursor
+
+  printf "\n${CYAN}${BOLD}%s${RESET}\n" "$prompt"
+  printf "${DIM}Use ↑/↓ to navigate, Space to toggle, Enter to confirm${RESET}\n\n"
+
+  for i in "${!options[@]}"; do
+    if [[ $i -eq $selected ]]; then
+      printf "  ${GREEN}❯${RESET} [ ] %s\n" "${options[$i]}"
+    else
+      printf "    [ ] ${DIM}%s${RESET}\n" "${options[$i]}"
+    fi
+  done
+
+  while true; do
+    IFS= read -rsn1 key
+
+    if [[ $key == $'\x1b' ]]; then
+      IFS= read -rsn1 -t 1 escape
+      if [[ $escape == "[" ]]; then
+        IFS= read -rsn1 -t 1 escape
+        case "$escape" in
+          A) ((selected > 0)) && ((selected--)) ;;
+          B) ((selected < count - 1)) && ((selected++)) ;;
+        esac
+      fi
+    elif [[ $key == " " ]]; then
+      if [[ "${checked[$selected]}" == "true" ]]; then
+        checked[$selected]="false"
+      else
+        checked[$selected]="true"
+      fi
+    elif [[ $key == "" ]]; then
+      break
+    fi
+
+    cursor_up "$count"
+    for i in "${!options[@]}"; do
+      printf "\r"
+      clear_line
+      if [[ "${checked[$i]}" == "true" ]]; then
+        if [[ $i -eq $selected ]]; then
+          printf "  ${GREEN}❯${RESET} [${GREEN}✓${RESET}] %s\n" "${options[$i]}"
+        else
+          printf "    [${GREEN}✓${RESET}] ${DIM}%s${RESET}\n" "${options[$i]}"
+        fi
+      else
+        if [[ $i -eq $selected ]]; then
+          printf "  ${GREEN}❯${RESET} [ ] %s\n" "${options[$i]}"
+        else
+          printf "    [ ] ${DIM}%s${RESET}\n" "${options[$i]}"
+        fi
+      fi
+    done
+  done
+
+  show_cursor
+
+  SELECTED_VALUES=()
+  for i in "${!options[@]}"; do
+    if [[ "${checked[$i]}" == "true" ]]; then
+      SELECTED_VALUES+=("${options[$i]}")
+    fi
+  done
+}
+
+usage() {
+  cat <<EOF
+${BOLD}${CYAN}$SCRIPT_NAME${RESET} - Kubernetes Access Sharing Tool
+
+${BOLD}Usage:${RESET}
+  $SCRIPT_NAME              Interactive mode
+  $SCRIPT_NAME --install    Install globally (macOS/Linux)
+  $SCRIPT_NAME --help       Show this help message
+
+EOF
+  exit 0
+}
+
+### --help ###
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+fi
+
+### --install ###
+if [[ "${1:-}" == "--install" ]]; then
+  printf "${CYAN}📦 Installing $SCRIPT_NAME globally...${RESET}\n"
+
+  if [[ "$EUID" -ne 0 ]]; then
+    printf "${YELLOW}🔐 sudo required for installation${RESET}\n"
+    sudo cp "$0" "$INSTALL_PATH"
+    sudo chmod +x "$INSTALL_PATH"
+  else
+    cp "$0" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+  fi
+
+  printf "${GREEN}✅ Installed to $INSTALL_PATH${RESET}\n"
+  printf "👉 You can now run: ${BOLD}$SCRIPT_NAME${RESET}\n"
+  exit 0
+fi
+
+choose_context() {
+  local contexts=()
+  while IFS= read -r line; do
+    contexts+=("$line")
+  done < <(kubectl config get-contexts -o name 2>/dev/null)
+
+  if [[ ${#contexts[@]} -eq 0 ]]; then
+    printf "${RED}❌ No Kubernetes contexts found${RESET}\n"
+    exit 1
+  fi
+
+  select_one "Select Kubernetes context:" "${contexts[@]}"
+  CONTEXT="$SELECTED_VALUE"
+  printf "\n${GREEN}✓${RESET} Selected context: ${BOLD}%s${RESET}\n" "$CONTEXT"
+}
+
+### LIST USERS ###
+list_users() {
+  printf "\n${CYAN}${BOLD}📋 Shared users in context: %s${RESET}\n" "$CONTEXT"
+  printf "┌────────────────────────┬────────────────────────┬──────────────────────┐\n"
+  printf "│ ${BOLD}%-22s${RESET} │ ${BOLD}%-22s${RESET} │ ${BOLD}%-20s${RESET} │\n" "User" "Namespace" "Access"
+  printf "├────────────────────────┼────────────────────────┼──────────────────────┤\n"
+
+  local bindings
+  bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+    -o custom-columns=NS:.metadata.namespace,SA:.subjects[0].name,ROLE:.roleRef.name \
+    --no-headers 2>/dev/null | grep -E "(${ROLE_RO}|${ROLE_RW})" || true)
+
+  if [[ -n "$bindings" ]]; then
+    while IFS= read -r line; do
+      local ns sa role access
+      ns=$(echo "$line" | awk '{print $1}')
+      sa=$(echo "$line" | awk '{print $2}')
+      role=$(echo "$line" | awk '{print $3}')
+      if [[ "$role" == "$ROLE_RO" ]]; then
+        access="Read-only"
+      else
+        access="Read-write"
+      fi
+      printf "│ %-22s │ %-22s │ %-20s │\n" "$sa" "$ns" "$access"
+    done <<< "$bindings"
+  else
+    printf "│ ${DIM}%-22s${RESET} │ ${DIM}%-22s${RESET} │ ${DIM}%-20s${RESET} │\n" "(no users found)" "-" "-"
+  fi
+
+  printf "└────────────────────────┴────────────────────────┴──────────────────────┘\n"
+
+  printf "\n"
+  read -rp "Press Enter to continue..."
+}
+
+### DELETE USER ###
+delete_user() {
+  # Get list of users
+  local users=()
+  local bindings
+  bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+    -o custom-columns=SA:.subjects[0].name \
+    --no-headers 2>/dev/null | grep -v "<none>" | sort -u || true)
+
+  if [[ -z "$bindings" ]]; then
+    printf "\n${YELLOW}No users found to delete.${RESET}\n"
+    printf "\n"
+    read -rp "Press Enter to continue..."
+    return
+  fi
+
+  while IFS= read -r line; do
+    users+=("$line")
+  done <<< "$bindings"
+
+  select_one "Select user to delete:" "${users[@]}"
+  local user_to_delete="$SELECTED_VALUE"
+
+  # Show user details
+  printf "\n${YELLOW}${BOLD}⚠️  User '%s' will be deleted${RESET}\n\n" "$user_to_delete"
+  printf "${BOLD}Current Access:${RESET}\n"
+
+  local user_bindings
+  user_bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+    -o custom-columns=NS:.metadata.namespace,ROLE:.roleRef.name \
+    --no-headers 2>/dev/null | grep -E "(${ROLE_RO}|${ROLE_RW})" || true)
+
+  # Get namespaces for this user
+  local ns_bindings
+  ns_bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+    -o custom-columns=NS:.metadata.namespace,SA:.subjects[0].name,ROLE:.roleRef.name \
+    --no-headers 2>/dev/null | grep "[[:space:]]${user_to_delete}[[:space:]]" || true)
+
+  if [[ -n "$ns_bindings" ]]; then
+    while IFS= read -r line; do
+      local ns role
+      ns=$(echo "$line" | awk '{print $1}')
+      role=$(echo "$line" | awk '{print $3}')
+      printf "  - %s (%s)\n" "$ns" "$role"
+    done <<< "$ns_bindings"
+  fi
+
+  select_one "Are you sure you want to delete this user?" "Yes, delete" "No, cancel"
+
+  if [[ "$SELECTED_INDEX" -eq 1 ]]; then
+    printf "\n${YELLOW}Cancelled.${RESET}\n"
+    return
+  fi
+
+  printf "\n${CYAN}🗑️  Deleting user: %s${RESET}\n" "$user_to_delete"
+
+  # Delete RoleBindings
+  local namespaces_with_bindings
+  namespaces_with_bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+    -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,SA:.subjects[0].name \
+    --no-headers 2>/dev/null | grep "[[:space:]]${user_to_delete}$" || true)
+
+  if [[ -n "$namespaces_with_bindings" ]]; then
+    while IFS= read -r line; do
+      local ns binding_name
+      ns=$(echo "$line" | awk '{print $1}')
+      binding_name=$(echo "$line" | awk '{print $2}')
+      printf "  ${DIM}Removing binding from %s...${RESET}" "$ns"
+      kubectl --context="$CONTEXT" delete rolebinding "$binding_name" -n "$ns" --ignore-not-found >/dev/null 2>&1
+      printf "\r  ${GREEN}✓${RESET} Removed binding from %s\n" "$ns"
+    done <<< "$namespaces_with_bindings"
+  fi
+
+  # Delete ClusterRoleBinding if exists
+  if kubectl --context="$CONTEXT" get clusterrolebinding "${user_to_delete}-cluster-access" &>/dev/null; then
+    printf "  ${DIM}Removing cluster access...${RESET}"
+    kubectl --context="$CONTEXT" delete clusterrolebinding "${user_to_delete}-cluster-access" --ignore-not-found >/dev/null 2>&1
+    printf "\r  ${GREEN}✓${RESET} Removed cluster access\n"
+  fi
+
+  # Delete ClusterRole if exists
+  if kubectl --context="$CONTEXT" get clusterrole "${user_to_delete}-cluster-access" &>/dev/null; then
+    kubectl --context="$CONTEXT" delete clusterrole "${user_to_delete}-cluster-access" --ignore-not-found >/dev/null 2>&1
+  fi
+
+  # Delete ServiceAccount
+  printf "  ${DIM}Removing ServiceAccount...${RESET}"
+  kubectl --context="$CONTEXT" delete serviceaccount "$user_to_delete" -n default --ignore-not-found >/dev/null 2>&1
+  printf "\r  ${GREEN}✓${RESET} Removed ServiceAccount\n"
+
+  printf "\n${GREEN}${BOLD}✅ User '%s' deleted successfully!${RESET}\n" "$user_to_delete"
+  printf "\n"
+  read -rp "Press Enter to continue..."
+}
+
+### CREATE ROLE ###
+create_role() {
+  local ns="$1"
+  local mode="$2"
+
+  if [[ "$mode" == "ro" ]]; then
+    kubectl --context="$CONTEXT" apply -n "$ns" -f - <<EOF >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: $ROLE_RO
+rules:
+- apiGroups: [""]
+  resources: [pods, pods/log, services, endpoints, configmaps, secrets, events, persistentvolumeclaims]
+  verbs: [get, list, watch]
+- apiGroups: ["apps"]
+  resources: [deployments, replicasets, statefulsets, daemonsets]
+  verbs: [get, list, watch]
+- apiGroups: ["batch"]
+  resources: [jobs, cronjobs]
+  verbs: [get, list, watch]
+- apiGroups: ["networking.k8s.io"]
+  resources: [ingresses, networkpolicies]
+  verbs: [get, list, watch]
+- apiGroups: ["autoscaling"]
+  resources: [horizontalpodautoscalers]
+  verbs: [get, list, watch]
+EOF
+  else
+    kubectl --context="$CONTEXT" apply -n "$ns" -f - <<EOF >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: $ROLE_RW
+rules:
+- apiGroups: [""]
+  resources: [pods, pods/log, pods/exec, services, endpoints, configmaps, secrets, events, persistentvolumeclaims]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: ["apps"]
+  resources: [deployments, replicasets, statefulsets, daemonsets]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: ["batch"]
+  resources: [jobs, cronjobs]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: ["networking.k8s.io"]
+  resources: [ingresses, networkpolicies]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: ["autoscaling"]
+  resources: [horizontalpodautoscalers]
+  verbs: [get, list, watch, create, update, patch, delete]
+EOF
+  fi
+}
+
+bind_role() {
+  local ns="$1"
+  local sa="$2"
+  local role="$3"
+
+  kubectl --context="$CONTEXT" apply -n "$ns" -f - <<EOF >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ${sa}-binding
+subjects:
+- kind: ServiceAccount
+  name: $sa
+  namespace: default
+roleRef:
+  kind: Role
+  name: $role
+  apiGroup: rbac.authorization.k8s.io
+EOF
+}
+
+create_cluster_role() {
+  local sa="$1"
+  shift
+  local options=("$@")
+  local rules=""
+
+  for opt in "${options[@]}"; do
+    case "$opt" in
+      "View nodes")
+        rules+='
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]'
+        ;;
+      "View storage")
+        rules+='
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get", "list"]'
+        ;;
+      "View cluster events")
+        rules+='
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list", "watch"]'
+        ;;
+    esac
+  done
+
+  if [[ -n "$rules" ]]; then
+    kubectl --context="$CONTEXT" apply -f - <<EOF >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ${sa}-cluster-access
+rules:${rules}
+EOF
+  fi
+}
+
+bind_cluster_role() {
+  local sa="$1"
+
+  kubectl --context="$CONTEXT" apply -f - <<EOF >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${sa}-cluster-access
+subjects:
+- kind: ServiceAccount
+  name: $sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: ${sa}-cluster-access
+  apiGroup: rbac.authorization.k8s.io
+EOF
+}
+
+generate_kubeconfig() {
+  local sa="$1"
+  shift
+  local namespaces=("$@")
+
+  printf "${CYAN}🔐 Generating token...${RESET}\n"
+  TOKEN=$(kubectl --context="$CONTEXT" create token "$sa" -n default)
+
+  CLUSTER=$(kubectl config view --raw -o jsonpath="{.contexts[?(@.name==\"$CONTEXT\")].context.cluster}")
+  SERVER=$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name==\"$CLUSTER\")].cluster.server}")
+  CA=$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name==\"$CLUSTER\")].cluster.certificate-authority-data}")
+
+  FILE="kubeconfig-${sa}.yaml"
+
+  local contexts=""
+  local first_context=""
+  for ns in "${namespaces[@]}"; do
+    local ctx_name="${sa}@${CLUSTER}/${ns}"
+    if [[ -z "$first_context" ]]; then
+      first_context="$ctx_name"
+    fi
+    contexts+="- name: ${ctx_name}
+  context:
+    cluster: ${CLUSTER}
+    user: ${sa}
+    namespace: ${ns}
+"
+  done
+
+  cat <<EOF > "$FILE"
+apiVersion: v1
+kind: Config
+clusters:
+- name: $CLUSTER
+  cluster:
+    server: $SERVER
+    certificate-authority-data: $CA
+users:
+- name: $sa
+  user:
+    token: $TOKEN
+contexts:
+${contexts}current-context: ${first_context}
+EOF
+
+  printf "${GREEN}📄 kubeconfig written: ${BOLD}$FILE${RESET}\n"
+  printf "${DIM}   Contains %d namespace contexts${RESET}\n" "${#namespaces[@]}"
+}
+
+### CREATE USER ###
+create_user() {
+  # Enter username
+  printf "\n${CYAN}${BOLD}Enter username (ServiceAccount name):${RESET}\n"
+  printf "${DIM}This will be used to create/update the ServiceAccount${RESET}\n"
+  printf "  ${GREEN}❯${RESET} "
+  read -r USER
+  [[ -z "$USER" ]] && { printf "${RED}❌ Username required${RESET}\n"; return; }
+
+  # Check if user exists
+  if kubectl --context="$CONTEXT" get serviceaccount "$USER" -n default &>/dev/null; then
+    printf "\n${YELLOW}${BOLD}⚠️  User '%s' already exists!${RESET}\n\n" "$USER"
+
+    printf "${BOLD}Current Access:${RESET}\n"
+    local bindings
+    bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+      -o custom-columns=NS:.metadata.namespace,SA:.subjects[0].name,ROLE:.roleRef.name \
+      --no-headers 2>/dev/null | grep "^.*[[:space:]]${USER}[[:space:]]" || true)
+
+    if [[ -n "$bindings" ]]; then
+      while IFS= read -r line; do
+        local ns role
+        ns=$(echo "$line" | awk '{print $1}')
+        role=$(echo "$line" | awk '{print $3}')
+        printf "  - %s (%s)\n" "$ns" "$role"
+      done <<< "$bindings"
+    else
+      printf "  ${DIM}(no bindings found)${RESET}\n"
+    fi
+
+    select_one "Do you want to overwrite this user?" "Yes, overwrite" "No, cancel"
+
+    if [[ "$SELECTED_INDEX" -eq 1 ]]; then
+      printf "\n${YELLOW}Cancelled.${RESET}\n"
+      return
+    fi
+    printf "\n${CYAN}Proceeding with overwrite...${RESET}\n"
+  fi
+
+  # Choose access level
+  select_one "Select access level:" "Read-only (view resources)" "Read-write (full access)"
+  if [[ "$SELECTED_INDEX" -eq 0 ]]; then
+    MODE="ro"
+    printf "\n${GREEN}✓${RESET} Access level: ${BOLD}Read-only${RESET}\n"
+  else
+    MODE="rw"
+    printf "\n${GREEN}✓${RESET} Access level: ${BOLD}Read-write${RESET}\n"
+  fi
+
+  # Choose namespaces
+  select_one "Grant access to all namespaces?" "Yes - all namespaces" "No - select specific namespaces"
+
+  if [[ "$SELECTED_INDEX" -eq 0 ]]; then
+    NAMESPACES=()
+    while IFS= read -r line; do
+      NAMESPACES+=("$line")
+    done < <(kubectl --context="$CONTEXT" get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    printf "\n${GREEN}✓${RESET} Granting access to ${BOLD}all %d namespaces${RESET}\n" "${#NAMESPACES[@]}"
+  else
+    ns_list=()
+    while IFS= read -r line; do
+      ns_list+=("$line")
+    done < <(kubectl --context="$CONTEXT" get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    select_many "Select namespaces:" "${ns_list[@]}"
+
+    if [[ ${#SELECTED_VALUES[@]} -eq 0 ]]; then
+      printf "\n${RED}❌ At least one namespace must be selected${RESET}\n"
+      return
+    fi
+
+    NAMESPACES=("${SELECTED_VALUES[@]}")
+    printf "\n${GREEN}✓${RESET} Selected ${BOLD}%d namespaces${RESET}\n" "${#NAMESPACES[@]}"
+  fi
+
+  # Cluster access options
+  select_many "Select cluster-wide access (optional):" "View nodes" "View storage" "View cluster events"
+  CLUSTER_OPTIONS=("${SELECTED_VALUES[@]}")
+  if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
+    printf "\n${GREEN}✓${RESET} Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
+  else
+    printf "\n${GREEN}✓${RESET} Cluster access: ${DIM}None${RESET}\n"
+  fi
+
+  # Summary
+  printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+  printf "${BOLD}Summary:${RESET}\n"
+  printf "  User:           ${BOLD}%s${RESET}\n" "$USER"
+  printf "  Access:         ${BOLD}%s${RESET}\n" "$([[ "$MODE" == "ro" ]] && echo "Read-only" || echo "Read-write")"
+  printf "  Namespaces:     ${BOLD}%d${RESET}\n" "${#NAMESPACES[@]}"
+  if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
+    printf "  Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
+  fi
+  printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+
+  select_one "Proceed with this configuration?" "Yes, apply" "No, cancel"
+  if [[ "$SELECTED_INDEX" -eq 1 ]]; then
+    printf "\n${YELLOW}Cancelled.${RESET}\n"
+    return
+  fi
+
+  # Apply configuration
+  printf "\n${CYAN}🔧 Creating ServiceAccount: %s${RESET}\n" "$USER"
+  kubectl --context="$CONTEXT" apply -n default -f - <<EOF >/dev/null
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $USER
+EOF
+
+  ROLE_NAME=$([[ "$MODE" == "ro" ]] && echo "$ROLE_RO" || echo "$ROLE_RW")
+
+  printf "${CYAN}📝 Applying access to namespaces...${RESET}\n"
+  for ns in "${NAMESPACES[@]}"; do
+    printf "  ${DIM}➡️  %s${RESET}" "$ns"
+    create_role "$ns" "$MODE"
+    bind_role "$ns" "$USER" "$ROLE_NAME"
+    printf "\r  ${GREEN}✓${RESET}  %s\n" "$ns"
+  done
+
+  if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
+    printf "${CYAN}🌐 Applying cluster-wide access...${RESET}\n"
+    create_cluster_role "$USER" "${CLUSTER_OPTIONS[@]}"
+    bind_cluster_role "$USER"
+    printf "  ${GREEN}✓${RESET} Cluster access configured\n"
+  fi
+
+  generate_kubeconfig "$USER" "${NAMESPACES[@]}"
+
+  printf "\n${GREEN}${BOLD}🎉 Access successfully granted!${RESET}\n"
+  printf "👉 Share the generated kubeconfig file securely.\n"
+  printf "${DIM}   Each namespace is a separate context in the kubeconfig.${RESET}\n"
+  printf "\n"
+  read -rp "Press Enter to continue..."
+}
+
+### MAIN MENU ###
+main_menu() {
+  while true; do
+    printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+    printf "${BOLD}${CYAN}   Kubernetes Access Sharing Tool${RESET}\n"
+    printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+    printf "  Context: ${BOLD}%s${RESET}\n" "$CONTEXT"
+
+    select_one "What would you like to do?" "List users" "Create user" "Delete user" "Change context" "Exit"
+
+    case "$SELECTED_INDEX" in
+      0) list_users ;;
+      1) create_user ;;
+      2) delete_user ;;
+      3) choose_context ;;
+      4)
+        printf "\n${GREEN}Goodbye!${RESET}\n\n"
+        exit 0
+        ;;
+    esac
+  done
+}
+
+### START ###
+printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+printf "${BOLD}${CYAN}   Kubernetes Access Sharing Tool${RESET}\n"
+printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+
+choose_context
+main_menu
