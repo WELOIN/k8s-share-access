@@ -434,7 +434,8 @@ EOF
 create_cluster_role() {
   local sa="$1"
   shift
-  local options=("$@")
+  local options=()
+  [[ $# -gt 0 ]] && options=("$@")
 
   # Always include namespace listing permission
   local rules='
@@ -442,8 +443,9 @@ create_cluster_role() {
   resources: ["namespaces"]
   verbs: ["get", "list"]'
 
-  for opt in "${options[@]}"; do
-    case "$opt" in
+  if [[ ${#options[@]} -gt 0 ]]; then
+    for opt in "${options[@]}"; do
+      case "$opt" in
       "View nodes")
         rules+='
 - apiGroups: [""]
@@ -465,8 +467,9 @@ create_cluster_role() {
   resources: ["events"]
   verbs: ["get", "list", "watch"]'
         ;;
-    esac
-  done
+      esac
+    done
+  fi
 
   kubectl --context="$CONTEXT" apply -f - <<EOF >/dev/null
 apiVersion: rbac.authorization.k8s.io/v1
