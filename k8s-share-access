@@ -501,11 +501,13 @@ EOF
 
 generate_kubeconfig() {
   local sa="$1"
-  shift
+  local duration="$2"
+  local expiry_label="$3"
+  shift 3
   local namespaces=("$@")
 
-  printf "${CYAN}🔐 Generating token...${RESET}\n"
-  TOKEN=$(kubectl --context="$CONTEXT" create token "$sa" -n "$SHARED_NS")
+  printf "${CYAN}🔐 Generating token (expires in %s)...${RESET}\n" "$expiry_label"
+  TOKEN=$(kubectl --context="$CONTEXT" create token "$sa" -n "$SHARED_NS" --duration="$duration")
 
   CLUSTER=$(kubectl config view --raw -o jsonpath="{.contexts[?(@.name==\"$CONTEXT\")].context.cluster}")
   SERVER=$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name==\"$CLUSTER\")].cluster.server}")
@@ -522,6 +524,8 @@ generate_kubeconfig() {
   cat <<EOF > "$FILE"
 apiVersion: v1
 kind: Config
+#
+# Token expires in: $expiry_label
 #
 # Accessible namespaces:
 $(printf "#   - %s\n" "${namespaces[@]}")
@@ -639,6 +643,18 @@ create_user() {
     printf "\n${GREEN}✓${RESET} Cluster access: ${DIM}None${RESET}\n"
   fi
 
+  # Token expiry
+  select_one "Select token expiry:" "24 hours" "1 week" "1 month" "1 year" "10 years (indefinite)" "← Go back"
+  case "$SELECTED_INDEX" in
+    0) TOKEN_DURATION="24h"; TOKEN_EXPIRY_LABEL="24 hours" ;;
+    1) TOKEN_DURATION="168h"; TOKEN_EXPIRY_LABEL="1 week" ;;
+    2) TOKEN_DURATION="720h"; TOKEN_EXPIRY_LABEL="1 month" ;;
+    3) TOKEN_DURATION="8760h"; TOKEN_EXPIRY_LABEL="1 year" ;;
+    4) TOKEN_DURATION="87600h"; TOKEN_EXPIRY_LABEL="10 years" ;;
+    5) return ;;
+  esac
+  printf "\n${GREEN}✓${RESET} Token expiry: ${BOLD}%s${RESET}\n" "$TOKEN_EXPIRY_LABEL"
+
   # Summary
   printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
   printf "${BOLD}Summary:${RESET}\n"
@@ -648,6 +664,7 @@ create_user() {
   if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
     printf "  Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
   fi
+  printf "  Token expiry:   ${BOLD}%s${RESET}\n" "$TOKEN_EXPIRY_LABEL"
   printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 
   select_one "Proceed with this configuration?" "Yes, apply" "No, cancel"
@@ -684,7 +701,7 @@ EOF
     printf "  ${GREEN}✓${RESET} Additional: ${CLUSTER_OPTIONS[*]}\n"
   fi
 
-  generate_kubeconfig "$USER" "${NAMESPACES[@]}"
+  generate_kubeconfig "$USER" "$TOKEN_DURATION" "$TOKEN_EXPIRY_LABEL" "${NAMESPACES[@]}"
 
   printf "\n${GREEN}${BOLD}🎉 Access successfully granted!${RESET}\n"
   printf "👉 Share the generated kubeconfig file securely.\n"
