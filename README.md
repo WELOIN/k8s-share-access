@@ -122,11 +122,12 @@ kubectl config use-context username@cluster/staging
 
 ## How It Works
 
-1. Creates a ServiceAccount in the `default` namespace
-2. Creates Roles with specified permissions in each selected namespace
-3. Creates RoleBindings to link the ServiceAccount to the Roles
-4. Optionally creates ClusterRole and ClusterRoleBinding for cluster-wide access
-5. Generates a token and creates a kubeconfig file
+1. Creates a dedicated `shared-access` namespace (if it doesn't exist)
+2. Creates a ServiceAccount in the `shared-access` namespace
+3. Creates Roles with specified permissions in each selected namespace
+4. Creates RoleBindings to link the ServiceAccount to the Roles
+5. Optionally creates ClusterRole and ClusterRoleBinding for cluster-wide access
+6. Generates a token and creates a kubeconfig file
 
 ## License
 

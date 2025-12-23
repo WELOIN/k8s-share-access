@@ -215,6 +215,11 @@ choose_context() {
   printf "\n${GREEN}✓${RESET} Selected context: ${BOLD}%s${RESET}\n" "$CONTEXT"
 }
 
+ensure_namespace() {
+  kubectl --context="$CONTEXT" get ns "$SHARED_NS" &>/dev/null || \
+    kubectl --context="$CONTEXT" create ns "$SHARED_NS" >/dev/null
+}
+
 ### LIST USERS ###
 list_users() {
   printf "\n${CYAN}${BOLD}📋 Shared users in context: %s${RESET}\n" "$CONTEXT"
@@ -337,7 +342,7 @@ delete_user() {
 
   # Delete ServiceAccount
   printf "  ${DIM}Removing ServiceAccount...${RESET}"
-  kubectl --context="$CONTEXT" delete serviceaccount "$user_to_delete" -n default --ignore-not-found >/dev/null 2>&1
+  kubectl --context="$CONTEXT" delete serviceaccount "$user_to_delete" -n "$SHARED_NS" --ignore-not-found >/dev/null 2>&1
   printf "\r  ${GREEN}✓${RESET} Removed ServiceAccount\n"
 
   printf "\n${GREEN}${BOLD}✅ User '%s' deleted successfully!${RESET}\n" "$user_to_delete"
@@ -412,7 +417,7 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: $sa
-  namespace: default
+  namespace: $SHARED_NS
 roleRef:
   kind: Role
   name: $role
@@ -474,7 +479,7 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: $sa
-  namespace: default
+  namespace: $SHARED_NS
 roleRef:
   kind: ClusterRole
   name: ${sa}-cluster-access
@@ -488,7 +493,7 @@ generate_kubeconfig() {
   local namespaces=("$@")
 
   printf "${CYAN}🔐 Generating token...${RESET}\n"
-  TOKEN=$(kubectl --context="$CONTEXT" create token "$sa" -n default)
+  TOKEN=$(kubectl --context="$CONTEXT" create token "$sa" -n "$SHARED_NS")
 
   CLUSTER=$(kubectl config view --raw -o jsonpath="{.contexts[?(@.name==\"$CONTEXT\")].context.cluster}")
   SERVER=$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name==\"$CLUSTER\")].cluster.server}")
@@ -541,7 +546,7 @@ create_user() {
   [[ -z "$USER" ]] && { printf "${RED}❌ Username required${RESET}\n"; return; }
 
   # Check if user exists
-  if kubectl --context="$CONTEXT" get serviceaccount "$USER" -n default &>/dev/null; then
+  if kubectl --context="$CONTEXT" get serviceaccount "$USER" -n "$SHARED_NS" &>/dev/null; then
     printf "\n${YELLOW}${BOLD}⚠️  User '%s' already exists!${RESET}\n\n" "$USER"
 
     printf "${BOLD}Current Access:${RESET}\n"
@@ -632,8 +637,9 @@ create_user() {
   fi
 
   # Apply configuration
+  ensure_namespace
   printf "\n${CYAN}🔧 Creating ServiceAccount: %s${RESET}\n" "$USER"
-  kubectl --context="$CONTEXT" apply -n default -f - <<EOF >/dev/null
+  kubectl --context="$CONTEXT" apply -n "$SHARED_NS" -f - <<EOF >/dev/null
 apiVersion: v1
 kind: ServiceAccount
 metadata:
