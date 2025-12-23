@@ -674,11 +674,11 @@ EOF
   done
 
   printf "${CYAN}🌐 Applying cluster-wide access...${RESET}\n"
-  create_cluster_role "$USER" "${CLUSTER_OPTIONS[@]}"
+  create_cluster_role "$USER" ${CLUSTER_OPTIONS[@]+"${CLUSTER_OPTIONS[@]}"}
   bind_cluster_role "$USER"
   printf "  ${GREEN}✓${RESET} Namespace listing enabled\n"
   if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
-    printf "  ${GREEN}✓${RESET} Additional: %s\n" "${CLUSTER_OPTIONS[*]}"
+    printf "  ${GREEN}✓${RESET} Additional: ${CLUSTER_OPTIONS[*]}\n"
   fi
 
   generate_kubeconfig "$USER" "${NAMESPACES[@]}"
