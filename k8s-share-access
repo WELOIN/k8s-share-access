@@ -499,15 +499,54 @@ roleRef:
 EOF
 }
 
+generate_secret_token() {
+  local sa="$1"
+  local secret_name="${sa}-token"
+
+  # Create secret bound to service account
+  kubectl --context="$CONTEXT" apply -n "$SHARED_NS" -f - <<EOF >/dev/null
+apiVersion: v1
+kind: Secret
+metadata:
+  name: $secret_name
+  annotations:
+    kubernetes.io/service-account.name: $sa
+type: kubernetes.io/service-account-token
+EOF
+
+  # Wait for token to be populated (up to 10 seconds)
+  local token=""
+  for i in {1..10}; do
+    token=$(kubectl --context="$CONTEXT" get secret "$secret_name" -n "$SHARED_NS" \
+      -o jsonpath='{.data.token}' 2>/dev/null | base64 -d)
+    [[ -n "$token" ]] && break
+    sleep 1
+  done
+
+  if [[ -z "$token" ]]; then
+    printf "${RED}❌ Failed to generate token${RESET}\n"
+    return 1
+  fi
+
+  echo "$token"
+}
+
 generate_kubeconfig() {
   local sa="$1"
   local duration="$2"
   local expiry_label="$3"
-  shift 3
+  local use_secret="$4"
+  shift 4
   local namespaces=("$@")
 
-  printf "${CYAN}🔐 Generating token (expires in %s)...${RESET}\n" "$expiry_label"
-  TOKEN=$(kubectl --context="$CONTEXT" create token "$sa" -n "$SHARED_NS" --duration="$duration")
+  if [[ "$use_secret" == "true" ]]; then
+    printf "${CYAN}🔐 Generating long-lived token (never expires)...${RESET}\n"
+    TOKEN=$(generate_secret_token "$sa")
+    [[ -z "$TOKEN" ]] && return 1
+  else
+    printf "${CYAN}🔐 Generating token (expires in %s)...${RESET}\n" "$expiry_label"
+    TOKEN=$(kubectl --context="$CONTEXT" create token "$sa" -n "$SHARED_NS" --duration="$duration")
+  fi
 
   CLUSTER=$(kubectl config view --raw -o jsonpath="{.contexts[?(@.name==\"$CONTEXT\")].context.cluster}")
   SERVER=$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name==\"$CLUSTER\")].cluster.server}")
@@ -644,13 +683,14 @@ create_user() {
   fi
 
   # Token expiry
-  select_one "Select token expiry:" "24 hours" "1 week" "1 month" "1 year" "10 years (indefinite)" "← Go back"
+  select_one "Select token expiry:" "24 hours" "1 week" "1 month" "1 year" "Never expires (long-lived)" "← Go back"
+  USE_SECRET_TOKEN=false
   case "$SELECTED_INDEX" in
     0) TOKEN_DURATION="24h"; TOKEN_EXPIRY_LABEL="24 hours" ;;
     1) TOKEN_DURATION="168h"; TOKEN_EXPIRY_LABEL="1 week" ;;
     2) TOKEN_DURATION="720h"; TOKEN_EXPIRY_LABEL="1 month" ;;
     3) TOKEN_DURATION="8760h"; TOKEN_EXPIRY_LABEL="1 year" ;;
-    4) TOKEN_DURATION="87600h"; TOKEN_EXPIRY_LABEL="10 years" ;;
+    4) TOKEN_DURATION=""; TOKEN_EXPIRY_LABEL="Never expires"; USE_SECRET_TOKEN=true ;;
     5) return ;;
   esac
   printf "\n${GREEN}✓${RESET} Token expiry: ${BOLD}%s${RESET}\n" "$TOKEN_EXPIRY_LABEL"
@@ -701,7 +741,7 @@ EOF
     printf "  ${GREEN}✓${RESET} Additional: ${CLUSTER_OPTIONS[*]}\n"
   fi
 
-  generate_kubeconfig "$USER" "$TOKEN_DURATION" "$TOKEN_EXPIRY_LABEL" "${NAMESPACES[@]}"
+  generate_kubeconfig "$USER" "$TOKEN_DURATION" "$TOKEN_EXPIRY_LABEL" "$USE_SECRET_TOKEN" "${NAMESPACES[@]}"
 
   printf "\n${GREEN}${BOLD}🎉 Access successfully granted!${RESET}\n"
   printf "👉 Share the generated kubeconfig file securely.\n"
