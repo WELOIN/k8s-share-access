@@ -163,6 +163,117 @@ select_many() {
   done
 }
 
+### MULTI SELECT WITH PRESELECTION ###
+select_many_preselected() {
+  local prompt="$1"
+  shift
+  local -a preselected=()
+
+  # Parse preselected items (format: --preselected item1 item2 ... --)
+  if [[ "$1" == "--preselected" ]]; then
+    shift
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+      preselected+=("$1")
+      shift
+    done
+    [[ "$1" == "--" ]] && shift
+  fi
+
+  local options=("$@")
+  local count=${#options[@]}
+  local selected=0
+  local i key escape
+  local -a checked=()
+
+  # Initialize checked array with preselected items
+  for ((i = 0; i < count; i++)); do
+    local is_preselected=false
+    for pre in "${preselected[@]+"${preselected[@]}"}"; do
+      if [[ "${options[$i]}" == "$pre" ]]; then
+        is_preselected=true
+        break
+      fi
+    done
+    if [[ "$is_preselected" == "true" ]]; then
+      checked+=("true")
+    else
+      checked+=("false")
+    fi
+  done
+
+  hide_cursor
+
+  printf "\n${CYAN}${BOLD}%s${RESET}\n" "$prompt"
+  printf "${DIM}Use ↑/↓ to navigate, Space to toggle, Enter to confirm${RESET}\n\n"
+
+  for i in "${!options[@]}"; do
+    if [[ "${checked[$i]}" == "true" ]]; then
+      if [[ $i -eq $selected ]]; then
+        printf "  ${GREEN}❯${RESET} [${GREEN}✓${RESET}] %s\n" "${options[$i]}"
+      else
+        printf "    [${GREEN}✓${RESET}] ${DIM}%s${RESET}\n" "${options[$i]}"
+      fi
+    else
+      if [[ $i -eq $selected ]]; then
+        printf "  ${GREEN}❯${RESET} [ ] %s\n" "${options[$i]}"
+      else
+        printf "    [ ] ${DIM}%s${RESET}\n" "${options[$i]}"
+      fi
+    fi
+  done
+
+  while true; do
+    IFS= read -rsn1 key
+
+    if [[ $key == $'\x1b' ]]; then
+      IFS= read -rsn1 -t 1 escape
+      if [[ $escape == "[" ]]; then
+        IFS= read -rsn1 -t 1 escape
+        case "$escape" in
+          A) ((selected > 0)) && ((selected--)) ;;
+          B) ((selected < count - 1)) && ((selected++)) ;;
+        esac
+      fi
+    elif [[ $key == " " ]]; then
+      if [[ "${checked[$selected]}" == "true" ]]; then
+        checked[$selected]="false"
+      else
+        checked[$selected]="true"
+      fi
+    elif [[ $key == "" ]]; then
+      break
+    fi
+
+    cursor_up "$count"
+    for i in "${!options[@]}"; do
+      printf "\r"
+      clear_line
+      if [[ "${checked[$i]}" == "true" ]]; then
+        if [[ $i -eq $selected ]]; then
+          printf "  ${GREEN}❯${RESET} [${GREEN}✓${RESET}] %s\n" "${options[$i]}"
+        else
+          printf "    [${GREEN}✓${RESET}] ${DIM}%s${RESET}\n" "${options[$i]}"
+        fi
+      else
+        if [[ $i -eq $selected ]]; then
+          printf "  ${GREEN}❯${RESET} [ ] %s\n" "${options[$i]}"
+        else
+          printf "    [ ] ${DIM}%s${RESET}\n" "${options[$i]}"
+        fi
+      fi
+    done
+  done
+
+  show_cursor
+
+  SELECTED_VALUES=()
+  for i in "${!options[@]}"; do
+    if [[ "${checked[$i]}" == "true" ]]; then
+      SELECTED_VALUES+=("${options[$i]}")
+    fi
+  done
+}
+
 usage() {
   cat <<EOF
 ${BOLD}${CYAN}$SCRIPT_NAME${RESET} - Kubernetes Access Sharing Tool
@@ -352,6 +463,238 @@ delete_user() {
   printf "\r  ${GREEN}✓${RESET} Removed ServiceAccount\n"
 
   printf "\n${GREEN}${BOLD}✅ User '%s' deleted successfully!${RESET}\n" "$user_to_delete"
+  printf "\n"
+  read -rp "Press Enter to continue..."
+}
+
+### EDIT USER ###
+edit_user() {
+  # Get list of users from rolebindings
+  local users=()
+  local bindings
+  bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+    -o custom-columns=SA:.subjects[0].name \
+    --no-headers 2>/dev/null | grep -v "<none>" | sort -u || true)
+
+  if [[ -z "$bindings" ]]; then
+    printf "\n${YELLOW}No users found to edit.${RESET}\n"
+    printf "\n"
+    read -rp "Press Enter to continue..."
+    return
+  fi
+
+  while IFS= read -r line; do
+    users+=("$line")
+  done <<< "$bindings"
+
+  users+=("← Go back")
+  select_one "Select user to edit:" "${users[@]}"
+
+  if [[ "$SELECTED_VALUE" == "← Go back" ]]; then
+    return
+  fi
+
+  local user_to_edit="$SELECTED_VALUE"
+
+  # Get current access info for this user
+  local current_bindings
+  current_bindings=$(kubectl --context="$CONTEXT" get rolebindings -A \
+    -o custom-columns=NS:.metadata.namespace,SA:.subjects[0].name,ROLE:.roleRef.name \
+    --no-headers 2>/dev/null | grep "[[:space:]]${user_to_edit}[[:space:]]" || true)
+
+  # Extract current namespaces and access level
+  local current_namespaces=()
+  local current_mode=""
+  if [[ -n "$current_bindings" ]]; then
+    while IFS= read -r line; do
+      local ns role
+      ns=$(echo "$line" | awk '{print $1}')
+      role=$(echo "$line" | awk '{print $3}')
+      current_namespaces+=("$ns")
+      # Determine mode from first binding found
+      if [[ -z "$current_mode" ]]; then
+        if [[ "$role" == "$ROLE_RO" ]]; then
+          current_mode="ro"
+        else
+          current_mode="rw"
+        fi
+      fi
+    done <<< "$current_bindings"
+  fi
+
+  # Get current cluster-wide options from ClusterRole
+  local current_cluster_options=()
+  local cluster_role_yaml
+  cluster_role_yaml=$(kubectl --context="$CONTEXT" get clusterrole "${user_to_edit}-cluster-access" -o yaml 2>/dev/null || true)
+  if [[ -n "$cluster_role_yaml" ]]; then
+    if echo "$cluster_role_yaml" | grep -q '"nodes"'; then
+      current_cluster_options+=("View nodes")
+    fi
+    if echo "$cluster_role_yaml" | grep -q '"persistentvolumes"'; then
+      current_cluster_options+=("View storage")
+    fi
+    if echo "$cluster_role_yaml" | grep -q '"events"' && echo "$cluster_role_yaml" | grep -q '"watch"'; then
+      current_cluster_options+=("View cluster events")
+    fi
+  fi
+
+  # Show current access
+  printf "\n${CYAN}${BOLD}📝 Editing user: %s${RESET}\n\n" "$user_to_edit"
+  printf "${BOLD}Current Access:${RESET}\n"
+  printf "  Access level: ${BOLD}%s${RESET}\n" "$([[ "$current_mode" == "ro" ]] && echo "Read-only" || echo "Read-write")"
+  printf "  Namespaces:   ${BOLD}%d${RESET} (" "${#current_namespaces[@]}"
+  printf "%s" "${current_namespaces[*]}"
+  printf ")\n"
+  if [[ ${#current_cluster_options[@]} -gt 0 ]]; then
+    printf "  Cluster:      ${BOLD}%s${RESET}\n" "${current_cluster_options[*]}"
+  else
+    printf "  Cluster:      ${DIM}None${RESET}\n"
+  fi
+  printf "\n${DIM}Note: Editing will not change the user's credentials (ServiceAccount/token remain unchanged)${RESET}\n"
+
+  # Choose new access level
+  local default_access_idx=0
+  [[ "$current_mode" == "rw" ]] && default_access_idx=1
+
+  if [[ "$default_access_idx" -eq 0 ]]; then
+    select_one "Select access level:" "Read-only (view resources) [current]" "Read-write (full access)" "← Go back"
+  else
+    select_one "Select access level:" "Read-only (view resources)" "Read-write (full access) [current]" "← Go back"
+  fi
+
+  if [[ "$SELECTED_INDEX" -eq 2 ]]; then
+    return
+  elif [[ "$SELECTED_INDEX" -eq 0 ]]; then
+    MODE="ro"
+    printf "\n${GREEN}✓${RESET} Access level: ${BOLD}Read-only${RESET}\n"
+  else
+    MODE="rw"
+    printf "\n${GREEN}✓${RESET} Access level: ${BOLD}Read-write${RESET}\n"
+  fi
+
+  # Choose namespaces (with current ones pre-selected)
+  select_one "Grant access to all namespaces?" "Yes - all namespaces" "No - select specific namespaces" "← Go back"
+
+  if [[ "$SELECTED_INDEX" -eq 2 ]]; then
+    return
+  elif [[ "$SELECTED_INDEX" -eq 0 ]]; then
+    NAMESPACES=()
+    while IFS= read -r line; do
+      NAMESPACES+=("$line")
+    done < <(kubectl --context="$CONTEXT" get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+    printf "\n${GREEN}✓${RESET} Granting access to ${BOLD}all %d namespaces${RESET}\n" "${#NAMESPACES[@]}"
+  else
+    ns_list=()
+    while IFS= read -r line; do
+      ns_list+=("$line")
+    done < <(kubectl --context="$CONTEXT" get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+
+    # Use preselected multi-select with current namespaces checked
+    select_many_preselected "Select namespaces:" --preselected "${current_namespaces[@]+"${current_namespaces[@]}"}" -- "${ns_list[@]}"
+
+    if [[ ${#SELECTED_VALUES[@]} -eq 0 ]]; then
+      printf "\n${RED}❌ At least one namespace must be selected${RESET}\n"
+      return
+    fi
+
+    NAMESPACES=("${SELECTED_VALUES[@]}")
+    printf "\n${GREEN}✓${RESET} Selected ${BOLD}%d namespaces${RESET}\n" "${#NAMESPACES[@]}"
+  fi
+
+  # Cluster access options (with current ones pre-selected)
+  select_many_preselected "Select cluster-wide access (optional):" --preselected "${current_cluster_options[@]+"${current_cluster_options[@]}"}" -- "View nodes" "View storage" "View cluster events"
+
+  CLUSTER_OPTIONS=("${SELECTED_VALUES[@]+"${SELECTED_VALUES[@]}"}")
+  if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
+    printf "\n${GREEN}✓${RESET} Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
+  else
+    printf "\n${GREEN}✓${RESET} Cluster access: ${DIM}None${RESET}\n"
+  fi
+
+  # Summary
+  printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+  printf "${BOLD}Summary of Changes:${RESET}\n"
+  printf "  User:           ${BOLD}%s${RESET}\n" "$user_to_edit"
+  printf "  Access:         ${BOLD}%s${RESET}" "$([[ "$MODE" == "ro" ]] && echo "Read-only" || echo "Read-write")"
+  [[ "$MODE" != "$current_mode" ]] && printf " ${YELLOW}(changed)${RESET}"
+  printf "\n"
+  printf "  Namespaces:     ${BOLD}%d${RESET}" "${#NAMESPACES[@]}"
+
+  # Calculate namespace changes
+  local added_ns=() removed_ns=()
+  for ns in "${NAMESPACES[@]}"; do
+    local found=false
+    for cns in "${current_namespaces[@]+"${current_namespaces[@]}"}"; do
+      [[ "$ns" == "$cns" ]] && found=true && break
+    done
+    [[ "$found" == "false" ]] && added_ns+=("$ns")
+  done
+  for cns in "${current_namespaces[@]+"${current_namespaces[@]}"}"; do
+    local found=false
+    for ns in "${NAMESPACES[@]}"; do
+      [[ "$cns" == "$ns" ]] && found=true && break
+    done
+    [[ "$found" == "false" ]] && removed_ns+=("$cns")
+  done
+
+  if [[ ${#added_ns[@]} -gt 0 || ${#removed_ns[@]} -gt 0 ]]; then
+    printf " ${YELLOW}(changed)${RESET}"
+  fi
+  printf "\n"
+
+  if [[ ${#added_ns[@]} -gt 0 ]]; then
+    printf "                  ${GREEN}+ Adding: %s${RESET}\n" "${added_ns[*]}"
+  fi
+  if [[ ${#removed_ns[@]} -gt 0 ]]; then
+    printf "                  ${RED}- Removing: %s${RESET}\n" "${removed_ns[*]}"
+  fi
+
+  if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
+    printf "  Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
+  fi
+  printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+
+  select_one "Apply these changes?" "Yes, apply" "No, cancel"
+  if [[ "$SELECTED_INDEX" -eq 1 ]]; then
+    printf "\n${YELLOW}Cancelled.${RESET}\n"
+    return
+  fi
+
+  # Apply changes
+  printf "\n${CYAN}🔧 Updating access for: %s${RESET}\n" "$user_to_edit"
+
+  ROLE_NAME=$([[ "$MODE" == "ro" ]] && echo "$ROLE_RO" || echo "$ROLE_RW")
+
+  # Remove bindings for namespaces that are no longer granted
+  if [[ ${#removed_ns[@]} -gt 0 ]]; then
+    printf "${CYAN}🗑️  Removing access from namespaces...${RESET}\n"
+    for ns in "${removed_ns[@]}"; do
+      printf "  ${DIM}➡️  %s${RESET}" "$ns"
+      kubectl --context="$CONTEXT" delete rolebinding "${user_to_edit}-binding" -n "$ns" --ignore-not-found >/dev/null 2>&1
+      printf "\r  ${RED}✗${RESET}  %s (removed)\n" "$ns"
+    done
+  fi
+
+  # Apply/update bindings for all selected namespaces
+  printf "${CYAN}📝 Applying access to namespaces...${RESET}\n"
+  for ns in "${NAMESPACES[@]}"; do
+    printf "  ${DIM}➡️  %s${RESET}" "$ns"
+    create_role "$ns" "$MODE"
+    bind_role "$ns" "$user_to_edit" "$ROLE_NAME"
+    printf "\r  ${GREEN}✓${RESET}  %s\n" "$ns"
+  done
+
+  # Update cluster role
+  printf "${CYAN}🌐 Updating cluster-wide access...${RESET}\n"
+  create_cluster_role "$user_to_edit" ${CLUSTER_OPTIONS[@]+"${CLUSTER_OPTIONS[@]}"}
+  bind_cluster_role "$user_to_edit"
+  printf "  ${GREEN}✓${RESET} Namespace listing enabled\n"
+  if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
+    printf "  ${GREEN}✓${RESET} Additional: ${CLUSTER_OPTIONS[*]}\n"
+  fi
+
+  printf "\n${GREEN}${BOLD}✅ User '%s' updated successfully!${RESET}\n" "$user_to_edit"
+  printf "${DIM}   Note: User's credentials remain unchanged. No need to regenerate kubeconfig.${RESET}\n"
   printf "\n"
   read -rp "Press Enter to continue..."
 }
@@ -758,14 +1101,15 @@ main_menu() {
     printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
     printf "  Context: ${BOLD}%s${RESET}\n" "$CONTEXT"
 
-    select_one "What would you like to do?" "List users" "Create user" "Delete user" "Change context" "Exit"
+    select_one "What would you like to do?" "List users" "Create user" "Edit user" "Delete user" "Change context" "Exit"
 
     case "$SELECTED_INDEX" in
       0) list_users ;;
       1) create_user ;;
-      2) delete_user ;;
-      3) choose_context ;;
-      4)
+      2) edit_user ;;
+      3) delete_user ;;
+      4) choose_context ;;
+      5)
         printf "\n${GREEN}Goodbye!${RESET}\n\n"
         exit 0
         ;;
