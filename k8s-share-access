@@ -667,22 +667,11 @@ edit_user() {
 
   # Remove bindings for namespaces that are no longer granted
   if [[ ${#removed_ns[@]} -gt 0 ]]; then
-    printf "${CYAN}🗑️  Removing access from namespaces...${RESET}\n"
-    for ns in "${removed_ns[@]}"; do
-      printf "  ${DIM}➡️  %s${RESET}" "$ns"
-      kubectl --context="$CONTEXT" delete rolebinding "${user_to_edit}-binding" -n "$ns" --ignore-not-found >/dev/null 2>&1
-      printf "\r  ${RED}✗${RESET}  %s (removed)\n" "$ns"
-    done
+    remove_namespace_access_parallel "$user_to_edit" "${removed_ns[@]}"
   fi
 
   # Apply/update bindings for all selected namespaces
-  printf "${CYAN}📝 Applying access to namespaces...${RESET}\n"
-  for ns in "${NAMESPACES[@]}"; do
-    printf "  ${DIM}➡️  %s${RESET}" "$ns"
-    create_role "$ns" "$MODE"
-    bind_role "$ns" "$user_to_edit" "$ROLE_NAME"
-    printf "\r  ${GREEN}✓${RESET}  %s\n" "$ns"
-  done
+  apply_namespace_access_parallel "$user_to_edit" "$MODE" "$ROLE_NAME" "${NAMESPACES[@]}"
 
   # Update cluster role
   printf "${CYAN}🌐 Updating cluster-wide access...${RESET}\n"
@@ -840,6 +829,72 @@ roleRef:
   name: ${sa}-cluster-access
   apiGroup: rbac.authorization.k8s.io
 EOF
+}
+
+### PARALLEL NAMESPACE OPERATIONS ###
+apply_namespace_access_parallel() {
+  local sa="$1"
+  local mode="$2"
+  local role_name="$3"
+  shift 3
+  local namespaces=("$@")
+  local count=${#namespaces[@]}
+  local max_parallel=10
+  local running=0
+  local completed=0
+  local failed=0
+
+  printf "${CYAN}📝 Applying access to %d namespaces...${RESET}" "$count"
+
+  for ns in "${namespaces[@]}"; do
+    (
+      create_role "$ns" "$mode" 2>/dev/null
+      bind_role "$ns" "$sa" "$role_name" 2>/dev/null
+    ) &
+
+    ((running++))
+
+    # Limit concurrent processes
+    if ((running >= max_parallel)); then
+      wait -n 2>/dev/null || true
+      ((running--))
+    fi
+  done
+
+  # Wait for remaining processes
+  wait
+
+  printf "\r${GREEN}✓${RESET}  Applied access to ${BOLD}%d namespaces${RESET}      \n" "$count"
+}
+
+remove_namespace_access_parallel() {
+  local sa="$1"
+  shift
+  local namespaces=("$@")
+  local count=${#namespaces[@]}
+  local max_parallel=10
+  local running=0
+
+  printf "${CYAN}🗑️  Removing access from %d namespaces...${RESET}" "$count"
+
+  for ns in "${namespaces[@]}"; do
+    (
+      kubectl --context="$CONTEXT" delete rolebinding "${sa}-binding" -n "$ns" --ignore-not-found >/dev/null 2>&1
+    ) &
+
+    ((running++))
+
+    # Limit concurrent processes
+    if ((running >= max_parallel)); then
+      wait -n 2>/dev/null || true
+      ((running--))
+    fi
+  done
+
+  # Wait for remaining processes
+  wait
+
+  printf "\r${RED}✗${RESET}  Removed access from ${BOLD}%d namespaces${RESET}      \n" "$count"
 }
 
 generate_secret_token() {
@@ -1068,13 +1123,7 @@ EOF
 
   ROLE_NAME=$([[ "$MODE" == "ro" ]] && echo "$ROLE_RO" || echo "$ROLE_RW")
 
-  printf "${CYAN}📝 Applying access to namespaces...${RESET}\n"
-  for ns in "${NAMESPACES[@]}"; do
-    printf "  ${DIM}➡️  %s${RESET}" "$ns"
-    create_role "$ns" "$MODE"
-    bind_role "$ns" "$USER" "$ROLE_NAME"
-    printf "\r  ${GREEN}✓${RESET}  %s\n" "$ns"
-  done
+  apply_namespace_access_parallel "$USER" "$MODE" "$ROLE_NAME" "${NAMESPACES[@]}"
 
   printf "${CYAN}🌐 Applying cluster-wide access...${RESET}\n"
   create_cluster_role "$USER" ${CLUSTER_OPTIONS[@]+"${CLUSTER_OPTIONS[@]}"}
