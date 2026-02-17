@@ -1,11 +1,11 @@
 # k8s-share-access Improvement Plan
 
 ## Token Expiration & Rotation
-- [ ] Add option to set custom token expiration time
+- [x] Add option to set custom token expiration time
 - [ ] Add "refresh token" command to regenerate tokens for existing users
 
 ## User Management Enhancements
-- [ ] Edit user - Modify existing user's namespace access without recreating
+- [x] Edit user - Modify existing user's namespace access without recreating
 - [ ] Show user details - View detailed permissions for a specific user
 - [ ] Export user list - Export all users to CSV/JSON
 
@@ -33,6 +33,7 @@
 - [ ] Test connection - Verify generated kubeconfig works before saving
 
 ## Additional Access Patterns
+- [x] Port forwarding - Optional port-forward permission for create and edit flows
 - [ ] Time-limited access - Auto-cleanup after X days
 - [ ] Custom role support - Use existing roles instead of creating new ones
 - [ ] Resource quotas - Optionally set resource quotas per user

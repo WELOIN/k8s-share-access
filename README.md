@@ -8,7 +8,8 @@ A simple, interactive CLI tool to share Kubernetes cluster access with team memb
 - **Multi-context support** - Switch between different Kubernetes clusters
 - **Granular permissions** - Read-only or Read-write access per namespace
 - **Cluster-wide options** - Optional access to nodes, storage, and cluster events
-- **User management** - List, create, and delete users with confirmations
+- **User management** - List, create, edit, and delete users with confirmations
+- **Port forwarding** - Optional port-forward permission for debugging
 - **Secure kubeconfig** - Generates kubeconfig with namespace-scoped contexts
 - **Cross-platform** - Works on macOS and Linux (no external dependencies)
 
@@ -56,6 +57,7 @@ After selecting a Kubernetes context, you'll see the main menu:
 What would you like to do?
   ❯ List users
     Create user
+    Edit user
     Delete user
     Change context
     Exit
@@ -67,9 +69,18 @@ What would you like to do?
 2. **Select access level** - Read-only or Read-write
 3. **Select namespaces** - All namespaces or specific ones
 4. **Cluster access** - Optional access to nodes, storage, events
-5. **Confirm** - Review summary and apply
+5. **Port forwarding** - Optional port-forward capability
+6. **Token expiry** - Choose token lifetime (24h to never expires)
+7. **Confirm** - Review summary and apply
 
-The tool generates a kubeconfig file (e.g., `kubeconfig-username.yaml`) with separate contexts for each namespace.
+The tool generates a kubeconfig file (e.g., `kubeconfig-username.yaml`) that can be shared securely.
+
+### Editing a User
+
+1. **Select user** - Pick from existing users
+2. **Modify settings** - Change access level, namespaces, cluster access, or port forwarding
+3. **Review changes** - Summary shows what changed with `(changed)` indicators
+4. **Apply** - Updates permissions without regenerating credentials
 
 ### Permissions
 
@@ -85,6 +96,9 @@ The tool generates a kubeconfig file (e.g., `kubeconfig-username.yaml`) with sep
 **Read-write access adds:**
 - Create, update, patch, delete operations
 - Pod exec capability
+
+**Optional namespace permissions:**
+- Port forwarding (`pods/portforward`)
 
 **Optional cluster access:**
 - View nodes (cluster health)
