@@ -522,6 +522,18 @@ edit_user() {
     done <<< "$current_bindings"
   fi
 
+  # Detect current port-forward state from role in first namespace
+  local current_port_forward=false
+  if [[ ${#current_namespaces[@]} -gt 0 ]]; then
+    local first_ns="${current_namespaces[0]}"
+    local role_to_check="$([[ "$current_mode" == "ro" ]] && echo "$ROLE_RO" || echo "$ROLE_RW")"
+    local role_yaml
+    role_yaml=$(kubectl --context="$CONTEXT" get role "$role_to_check" -n "$first_ns" -o yaml 2>/dev/null || true)
+    if [[ -n "$role_yaml" ]] && echo "$role_yaml" | grep -q '"pods/portforward"'; then
+      current_port_forward=true
+    fi
+  fi
+
   # Get current cluster-wide options from ClusterRole
   local current_cluster_options=()
   local cluster_role_yaml
@@ -545,6 +557,7 @@ edit_user() {
   printf "  Namespaces:   ${BOLD}%d${RESET} (" "${#current_namespaces[@]}"
   printf "%s" "${current_namespaces[*]}"
   printf ")\n"
+  printf "  Port forward: ${BOLD}%s${RESET}\n" "$([[ "$current_port_forward" == "true" ]] && echo "Enabled" || echo "Disabled")"
   if [[ ${#current_cluster_options[@]} -gt 0 ]]; then
     printf "  Cluster:      ${BOLD}%s${RESET}\n" "${current_cluster_options[*]}"
   else
@@ -611,6 +624,33 @@ edit_user() {
     printf "\n${GREEN}✓${RESET} Cluster access: ${DIM}None${RESET}\n"
   fi
 
+  # Port forwarding option
+  if [[ "$current_port_forward" == "true" ]]; then
+    select_one "Enable port forwarding?" "Yes [current]" "No" "← Go back"
+    if [[ "$SELECTED_INDEX" -eq 2 ]]; then
+      return
+    elif [[ "$SELECTED_INDEX" -eq 0 ]]; then
+      PORT_FORWARD=true
+    else
+      PORT_FORWARD=false
+    fi
+  else
+    select_one "Enable port forwarding?" "No [current]" "Yes" "← Go back"
+    if [[ "$SELECTED_INDEX" -eq 2 ]]; then
+      return
+    elif [[ "$SELECTED_INDEX" -eq 1 ]]; then
+      PORT_FORWARD=true
+    else
+      PORT_FORWARD=false
+    fi
+  fi
+
+  if [[ "$PORT_FORWARD" == "true" ]]; then
+    printf "\n${GREEN}✓${RESET} Port forwarding: ${BOLD}Enabled${RESET}\n"
+  else
+    printf "\n${GREEN}✓${RESET} Port forwarding: ${DIM}Disabled${RESET}\n"
+  fi
+
   # Summary
   printf "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
   printf "${BOLD}Summary of Changes:${RESET}\n"
@@ -652,6 +692,9 @@ edit_user() {
   if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
     printf "  Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
   fi
+  printf "  Port forward:   ${BOLD}%s${RESET}" "$([[ "$PORT_FORWARD" == "true" ]] && echo "Enabled" || echo "Disabled")"
+  [[ "$PORT_FORWARD" != "$current_port_forward" ]] && printf " ${YELLOW}(changed)${RESET}"
+  printf "\n"
   printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 
   select_one "Apply these changes?" "Yes, apply" "No, cancel"
@@ -671,7 +714,7 @@ edit_user() {
   fi
 
   # Apply/update bindings for all selected namespaces
-  apply_namespace_access_parallel "$user_to_edit" "$MODE" "$ROLE_NAME" "${NAMESPACES[@]}"
+  apply_namespace_access_parallel "$user_to_edit" "$MODE" "$ROLE_NAME" "$PORT_FORWARD" "${NAMESPACES[@]}"
 
   # Update cluster role
   printf "${CYAN}🌐 Updating cluster-wide access...${RESET}\n"
@@ -692,6 +735,15 @@ edit_user() {
 create_role() {
   local ns="$1"
   local mode="$2"
+  local port_forward="${3:-false}"
+
+  local pf_rule=""
+  if [[ "$port_forward" == "true" ]]; then
+    pf_rule='
+- apiGroups: [""]
+  resources: [pods/portforward]
+  verbs: [create]'
+  fi
 
   if [[ "$mode" == "ro" ]]; then
     kubectl --context="$CONTEXT" apply -n "$ns" -f - <<EOF >/dev/null
@@ -714,7 +766,7 @@ rules:
   verbs: [get, list, watch]
 - apiGroups: ["autoscaling"]
   resources: [horizontalpodautoscalers]
-  verbs: [get, list, watch]
+  verbs: [get, list, watch]${pf_rule}
 EOF
   else
     kubectl --context="$CONTEXT" apply -n "$ns" -f - <<EOF >/dev/null
@@ -737,7 +789,7 @@ rules:
   verbs: [get, list, watch, create, update, patch, delete]
 - apiGroups: ["autoscaling"]
   resources: [horizontalpodautoscalers]
-  verbs: [get, list, watch, create, update, patch, delete]
+  verbs: [get, list, watch, create, update, patch, delete]${pf_rule}
 EOF
   fi
 }
@@ -836,7 +888,8 @@ apply_namespace_access_parallel() {
   local sa="$1"
   local mode="$2"
   local role_name="$3"
-  shift 3
+  local port_forward="$4"
+  shift 4
   local namespaces=("$@")
   local count=${#namespaces[@]}
   local max_parallel=10
@@ -848,7 +901,7 @@ apply_namespace_access_parallel() {
 
   for ns in "${namespaces[@]}"; do
     (
-      create_role "$ns" "$mode" 2>/dev/null
+      create_role "$ns" "$mode" "$port_forward" 2>/dev/null
       bind_role "$ns" "$sa" "$role_name" 2>/dev/null
     ) &
 
@@ -1080,6 +1133,18 @@ create_user() {
     printf "\n${GREEN}✓${RESET} Cluster access: ${DIM}None${RESET}\n"
   fi
 
+  # Port forwarding option
+  select_one "Enable port forwarding?" "No" "Yes" "← Go back"
+  if [[ "$SELECTED_INDEX" -eq 2 ]]; then
+    return
+  elif [[ "$SELECTED_INDEX" -eq 1 ]]; then
+    PORT_FORWARD=true
+    printf "\n${GREEN}✓${RESET} Port forwarding: ${BOLD}Enabled${RESET}\n"
+  else
+    PORT_FORWARD=false
+    printf "\n${GREEN}✓${RESET} Port forwarding: ${DIM}Disabled${RESET}\n"
+  fi
+
   # Token expiry
   select_one "Select token expiry:" "24 hours" "1 week" "1 month" "1 year" "Never expires (long-lived)" "← Go back"
   USE_SECRET_TOKEN=false
@@ -1102,6 +1167,9 @@ create_user() {
   if [[ ${#CLUSTER_OPTIONS[@]} -gt 0 ]]; then
     printf "  Cluster access: ${BOLD}%s${RESET}\n" "${CLUSTER_OPTIONS[*]}"
   fi
+  if [[ "$PORT_FORWARD" == "true" ]]; then
+    printf "  Port forward:   ${BOLD}Enabled${RESET}\n"
+  fi
   printf "  Token expiry:   ${BOLD}%s${RESET}\n" "$TOKEN_EXPIRY_LABEL"
   printf "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 
@@ -1123,7 +1191,7 @@ EOF
 
   ROLE_NAME=$([[ "$MODE" == "ro" ]] && echo "$ROLE_RO" || echo "$ROLE_RW")
 
-  apply_namespace_access_parallel "$USER" "$MODE" "$ROLE_NAME" "${NAMESPACES[@]}"
+  apply_namespace_access_parallel "$USER" "$MODE" "$ROLE_NAME" "$PORT_FORWARD" "${NAMESPACES[@]}"
 
   printf "${CYAN}🌐 Applying cluster-wide access...${RESET}\n"
   create_cluster_role "$USER" ${CLUSTER_OPTIONS[@]+"${CLUSTER_OPTIONS[@]}"}
